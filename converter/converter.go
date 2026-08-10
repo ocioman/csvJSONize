@@ -1,11 +1,12 @@
 package converter
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"strings"
 )
 
 var ce conversionError
@@ -18,10 +19,32 @@ func (ce conversionError) Error() string {
 	return fmt.Sprintf("error during conversion:")
 }
 
-func Serialize(is io.Reader, os io.Writer) error {
+func Serialize(is io.Reader, os io.Writer) (err error) {
 	csvReader := csv.NewReader(is)
-	builder := strings.Builder{}
-	encoder := json.NewEncoder(&builder)
+	bw := bufio.NewWriter(os)
+
+	/*
+		eseguo il join in modo che se viene catturato un errore prima del flush e anche il flush causa
+		errore (che viene sempre eseguito prima di ogni return a causa del defer) li stampo entrambi
+	*/
+	defer func() {
+		if flushErr := bw.Flush(); flushErr != nil {
+			if err != nil {
+				err = errors.Join(err, fmt.Errorf("%s %w", ce.Error(), flushErr))
+			} else {
+				err = fmt.Errorf("%s %w", ce.Error(), flushErr)
+			}
+		}
+	}()
+
+	/*
+		uso un bufio in modo da poter scrivere ogni volta la stringa in un buffer
+		senza usare il builder -> se ho un file da 2gb lo spezzo in parti da 4kb
+		e ogni volta che il buffer si riempie faccio il flush -> in questo modo
+		non avrò mai più di 4kb in ram -> se usassi uno string builder terrei 2gb di stringa
+		all'interno della ram fino al flush
+	*/
+	encoder := json.NewEncoder(bw)
 
 	//leggo gli headers del csv
 	headers, headersErr := csvReader.Read()
@@ -32,8 +55,13 @@ func Serialize(is io.Reader, os io.Writer) error {
 		return fmt.Errorf("%s %w", ce.Error(), headersErr)
 	}
 
-	builder.WriteRune('[')
-	builder.WriteRune('\n')
+	_, writeOpeningErr := bw.WriteString("[\n")
+
+	if writeOpeningErr != nil {
+		return fmt.Errorf("%s %w", ce.Error(), writeOpeningErr)
+	}
+
+	firstRecord := true
 
 	for {
 		data := make(map[string]string)
@@ -47,8 +75,12 @@ func Serialize(is io.Reader, os io.Writer) error {
 		}
 
 		//json non accetta il trailing comma, quindi scrivo ',' in tutti i record tranne all'inizio del primo e la fine dell'ultimo
-		if len([]rune(builder.String())) > 2 {
-			builder.WriteRune(',')
+		if !firstRecord {
+			_, writeCommaErr := bw.WriteRune(',')
+
+			if writeCommaErr != nil {
+				return fmt.Errorf("%s %w", ce.Error(), writeCommaErr)
+			}
 		}
 
 		if len(record) < len(headers) {
@@ -56,7 +88,7 @@ func Serialize(is io.Reader, os io.Writer) error {
 		}
 
 		for i, v := range record {
-			if len([]rune(v)) == 0 {
+			if v == "" {
 				data[headers[i]] = "null"
 			} else {
 				data[headers[i]] = v
@@ -68,17 +100,19 @@ func Serialize(is io.Reader, os io.Writer) error {
 		if encoderErr != nil {
 			return fmt.Errorf("%s %w", ce.Error(), encoderErr)
 		}
+
+		if firstRecord {
+			firstRecord = false
+		}
 	}
 
-	builder.WriteRune(']')
+	_, writeClosingErr := bw.WriteRune(']')
 
-	_, writeErr := os.Write([]byte(builder.String()))
-
-	if writeErr != nil {
-		return fmt.Errorf("%s %w", ce.Error(), writeErr)
+	if writeClosingErr != nil {
+		return fmt.Errorf("%s %w", ce.Error(), writeClosingErr)
 	}
 
-	return nil
+	return err
 }
 
 func Deserialize(is io.Reader, os io.Writer) error {
