@@ -11,9 +11,7 @@ import (
 
 var ce conversionError
 
-type conversionError struct {
-	defaultMess string
-}
+type conversionError struct{}
 
 func (ce conversionError) Error() string {
 	return fmt.Sprintf("error during conversion:")
