@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+var ce conversionError
+
 type conversionError struct {
 	defaultMess string
 }
@@ -17,7 +19,6 @@ func (ce conversionError) Error() string {
 }
 
 func Serialize(is io.Reader, os io.Writer) error {
-	var ce conversionError
 	csvReader := csv.NewReader(is)
 	builder := strings.Builder{}
 	encoder := json.NewEncoder(&builder)
@@ -75,6 +76,75 @@ func Serialize(is io.Reader, os io.Writer) error {
 
 	if writeErr != nil {
 		return fmt.Errorf("%s %w", ce.Error(), writeErr)
+	}
+
+	return nil
+}
+
+func Deserialize(is io.Reader, os io.Writer) error {
+	csvWriter := csv.NewWriter(os)
+	decoder := json.NewDecoder(is)
+	firstRecord := true
+
+	defer csvWriter.Flush()
+
+	//devo estrarre "[" altrimenti deserializza tutto l'array JSON
+	token, delError := decoder.Token()
+
+	if delError == io.EOF {
+		return fmt.Errorf("%s stream ended unexpectedly", ce.Error())
+	} else if delError != nil {
+		return fmt.Errorf("%s %w", ce.Error(), delError)
+	}
+
+	del, isToken := token.(json.Delim)
+
+	if isToken {
+		if del != json.Delim('[') {
+			return fmt.Errorf("%s unknown delim: %s", ce.Error(), del)
+		}
+	} else {
+		return fmt.Errorf("%s expected a delim token", ce.Error())
+	}
+
+	headers := make([]string, 0)
+
+	for decoder.More() {
+		//uso any perché valori numerici/bool potrebbero essere soggetti a type inference e causare errore
+		//se avessi string-string
+		data := make(map[string]any)
+		fields := make([]string, 0)
+		decodeErr := decoder.Decode(&data)
+
+		if decodeErr == io.EOF {
+			return fmt.Errorf("%s stream ended unexpectedly", ce.Error())
+		} else if decodeErr != nil {
+			return fmt.Errorf("%s %w", ce.Error(), decodeErr)
+		}
+
+		//scrittura header
+		if firstRecord {
+			for k := range data {
+				headers = append(headers, k)
+			}
+			headersErr := csvWriter.Write(headers)
+
+			if headersErr != nil {
+				return fmt.Errorf("%s %w", ce.Error(), headersErr)
+			}
+
+			firstRecord = false
+		}
+
+		for _, h := range headers {
+			fields = append(fields, fmt.Sprintf("%v", data[h]))
+		}
+
+		writeErr := csvWriter.Write(fields)
+
+		if writeErr != nil {
+			return fmt.Errorf("%s %w", ce.Error(), writeErr)
+		}
 	}
 
 	return nil
